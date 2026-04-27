@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stock-advisor-agent"
+version = "0.1.0"
+description = "Controlled stock advisor agent for US stock trade plans."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26",
+  "fastapi>=0.115",
+  "httpx>=0.27",
+  "mcp>=1.0",
+  "Pillow>=10",
+  "transformers>=4.40",
+  "uvicorn>=0.30",
+]
+
+[project.scripts]
+invest-stock-advisor-api = "invest_digital_human.stock_advisor_api:run"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
