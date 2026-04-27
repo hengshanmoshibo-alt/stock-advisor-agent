@@ -12,7 +12,8 @@
 - **回测校准**：使用历史 K 线校准部分买入区间和置信度修正。
 - **多轮上下文**：同一会话内支持“那第一买点呢”“防守位是什么意思”“为什么不是现在买”等追问。
 - **概念解释**：支持 MA200、RSI、ATR、防守位等概念说明。
-- **前端聊天页**：React + Vite，支持流式回答、结构化交易计划卡片、最近对话恢复。
+- **LangGraph 编排**：用显式图节点组织意图判断、工具执行、交易计划、回答校验和上下文保存。
+- **前端聊天页**：React + Vite，支持流式回答、Agent 进度、结构化交易计划卡片、最近对话恢复。
 
 当前版本聚焦 **美股和美股 ETF** 的交易计划生成。
 
@@ -29,18 +30,20 @@ LLM 负责：
 
 ```text
 用户问题
-  -> LLM 判断节点
-  -> 工具执行
+  -> LangGraph resolve_intent
+  -> conditional route
+  -> run_trade_tools
      - quote_lookup
      - market_candles
      - fundamentals
      - market_context
      - technical_nodes
      - backtest_calibration
-  -> 确定性交易计划计算
-  -> LLM 润色
-  -> 后端一致性校验
-  -> SSE 输出 answer + structured.trade_plan
+  -> build_trade_plan
+  -> generate_answer
+  -> validate_answer
+  -> save_context
+  -> SSE 输出 progress + answer + structured.trade_plan
 ```
 
 ## 项目结构
@@ -165,7 +168,7 @@ npm run build
 当前基线：
 
 ```text
-59 backend tests
+60 backend tests
 frontend build passes
 ```
 

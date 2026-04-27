@@ -55,11 +55,7 @@ class ConversationIntent:
 
 
 class ConversationIntentResolver:
-    """LLM-only router for stock-advisor conversations.
-
-    The model decides intent and context relation. This class only validates
-    the JSON contract and safety boundaries before the service routes.
-    """
+    """LLM-only router for stock-advisor conversations."""
 
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
@@ -84,12 +80,16 @@ class ConversationIntentResolver:
             try:
                 return await self._call_openai_compatible(query, last_trade_context)
             except Exception:
-                if self.settings.ollama_model and self.settings.ollama_model.lower() not in {"none", "off"}:
+                if self._ollama_enabled:
                     return await self._call_ollama(query, last_trade_context)
                 raise
-        if self.settings.ollama_model and self.settings.ollama_model.lower() not in {"none", "off"}:
+        if self._ollama_enabled:
             return await self._call_ollama(query, last_trade_context)
         raise RuntimeError("No LLM configured for conversation intent resolution")
+
+    @property
+    def _ollama_enabled(self) -> bool:
+        return bool(self.settings.ollama_model and self.settings.ollama_model.lower() not in {"none", "off"})
 
     async def _call_openai_compatible(
         self,
@@ -143,24 +143,21 @@ class ConversationIntentResolver:
 
 def _system_prompt() -> str:
     return (
-        "你是股票建议系统的对话判断节点，只判断用户意图和上下文关系，不回答问题。"
+        "你是股票建议 Agent 的对话判断节点，只判断意图和上下文关系，不回答投资问题。"
         "你必须只输出严格 JSON，不要输出 Markdown、解释或多余文本。"
-        "输出字段固定为：intent、relation_to_last_trade、target_ticker、target_name、requested_field、confidence、clarifying_question、reason。"
+        "固定字段：intent、relation_to_last_trade、target_ticker、target_name、requested_field、confidence、clarifying_question、reason。"
         "intent 只能是 trade_plan、context_followup、concept_explain、article_history、clarify。"
         "relation_to_last_trade 只能是 followup、new_stock、none、ambiguous。"
         "requested_field 只能是 watch_zone、first_buy_zone、deep_buy_zone、defense、confirmation、invalidation、rationale、full_plan 或 null。"
-        "本系统当前只支持美股和美股 ETF。只有能确定为美股/美股 ETF 时，才允许 intent=trade_plan。"
-        "如果用户问 A 股、港股、基金、加密货币、外汇，或者公司名明确但不是美股标的，intent=clarify，target_ticker 为空，clarifying_question 要说明当前只支持美股，并让用户输入美股名称或代码。"
-        "如果用户给的是跨市场名称或市场不明确的公司名，不要猜 ticker；intent=clarify，并要求用户提供美股 ticker。"
-        "如果用户问某只美股现在怎么买、买入节点、买点、建仓、加仓、防守位、止损、交易计划，intent=trade_plan，并输出 target_ticker。"
-        "如果用户说换成 X、再看 X、X 呢，且 X 是明确美股或美股 ETF，intent=trade_plan，relation_to_last_trade=new_stock，并输出 target_ticker。"
-        "如果用户没有说新股票，但明显是在追问上一轮交易计划里的字段，intent=context_followup，relation_to_last_trade=followup，并输出 requested_field。"
-        "如果用户追问为什么不是现在买、为什么不能买、为什么只观察，requested_field 必须是 rationale，不要输出 first_buy_zone。"
-        "如果有最近一次交易计划上下文，用户追问防守位、这个防守位是什么意思、止损线、跌破哪里失效，intent=context_followup，requested_field 必须是 defense 或 invalidation。"
-        "只有在没有最近一次交易计划上下文时，防守位是什么意思才作为 concept_explain。"
-        "如果用户问 MA200、RSI14、ATR、均线、观察区、第一买入区等概念是什么意思，intent=concept_explain。"
-        "如果用户明确问历史文章、文章里、作者观点、以前提到过什么，intent=article_history。"
-        "如果用户没有给股票且没有足够上下文，例如只说买入节点，intent=clarify，并给 clarifying_question。"
+        "当用户询问美股或美股 ETF 的买入节点、买点、建仓、加仓、防守位、止损、交易计划、现在能不能买时，intent=trade_plan，并输出 target_ticker。"
+        "当用户说换成 X、再看 X、X 呢，且 X 是明确的新标的时，intent=trade_plan，relation_to_last_trade=new_stock。"
+        "当用户没有给新股票，但明显追问上一轮交易计划的字段时，intent=context_followup，relation_to_last_trade=followup。"
+        "追问为什么不是现在买、为什么不能买、为什么只观察时，requested_field 必须是 rationale。"
+        "追问防守位、防守位是什么意思、止损线、跌破哪里失效时，如果有最近交易计划上下文，requested_field 必须是 defense 或 invalidation。"
+        "只有没有最近交易计划上下文时，防守位是什么意思才作为 concept_explain。"
+        "当用户问 MA200、RSI14、ATR、均线、观察区、第一买入区等概念时，intent=concept_explain。"
+        "当用户明确问历史文章、文章里、作者观点、以前提到过什么时，intent=article_history。"
+        "当用户没有给股票且没有足够上下文，例如只说买入节点，intent=clarify，并给 clarifying_question。"
         "不要计算价格，不要生成买卖建议，不要编造 ticker。"
     )
 
@@ -172,19 +169,16 @@ def _user_prompt(query: str, last_trade_context: LastTradeIntentContext | None) 
         else "null"
     )
     return (
-        "请判断当前用户问题的路由，只输出 JSON。\n"
+        "请判断当前用户问题的路由，只输出单个 JSON 对象。\n"
         f"当前用户问题：{query}\n\n"
-        "最近一次成功交易计划上下文 JSON：\n"
-        f"{context_json}\n\n"
-        "必须输出单个 JSON 对象，不要输出数组。下面是示例，不能照抄示例：\n"
-        '示例1：{"intent":"context_followup","relation_to_last_trade":"followup","target_ticker":"NVDA","target_name":"英伟达","requested_field":"first_buy_zone","confidence":0.93,"clarifying_question":"","reason":"用户追问上一轮交易计划的第一买点"}\n'
-        '示例2：{"intent":"trade_plan","relation_to_last_trade":"new_stock","target_ticker":"MSFT","target_name":"微软","requested_field":"full_plan","confidence":0.94,"clarifying_question":"","reason":"用户切换到新的股票微软"}\n'
-        '示例3：{"intent":"concept_explain","relation_to_last_trade":"none","target_ticker":"","target_name":"","requested_field":null,"confidence":0.95,"clarifying_question":"","reason":"用户询问技术指标概念"}\n'
-        '示例4：{"intent":"clarify","relation_to_last_trade":"ambiguous","target_ticker":"","target_name":"","requested_field":null,"confidence":0.9,"clarifying_question":"请补充股票名称或代码，例如：微软现在买入节点是多少？","reason":"用户没有提供具体股票"}\n'
-        '示例5：{"intent":"context_followup","relation_to_last_trade":"followup","target_ticker":"NVDA","target_name":"英伟达","requested_field":"rationale","confidence":0.93,"clarifying_question":"","reason":"用户追问为什么不是现在买"}\n'
-        '示例6：{"intent":"context_followup","relation_to_last_trade":"followup","target_ticker":"NVDA","target_name":"英伟达","requested_field":"defense","confidence":0.93,"clarifying_question":"","reason":"用户追问防守位"}\n'
-        '示例7：{"intent":"context_followup","relation_to_last_trade":"followup","target_ticker":"AMZN","target_name":"亚马逊","requested_field":"defense","confidence":0.93,"clarifying_question":"","reason":"用户在上一轮交易计划后追问防守位是什么意思"}\n'
-        '示例8：{"intent":"clarify","relation_to_last_trade":"ambiguous","target_ticker":"","target_name":"中国银行","requested_field":null,"confidence":0.9,"clarifying_question":"当前股票建议项目只支持美股和美股 ETF。中国银行不是当前支持范围，请输入美股名称或代码，例如：微软、英伟达、AMZN、TSLA。","reason":"用户询问非美股标的"}'
+        f"最近一次成功交易计划上下文 JSON：\n{context_json}\n\n"
+        "示例：\n"
+        '{"intent":"context_followup","relation_to_last_trade":"followup","target_ticker":"NVDA","target_name":"英伟达","requested_field":"first_buy_zone","confidence":0.93,"clarifying_question":"","reason":"用户追问上一轮交易计划的第一买点"}\n'
+        '{"intent":"trade_plan","relation_to_last_trade":"new_stock","target_ticker":"MSFT","target_name":"微软","requested_field":"full_plan","confidence":0.94,"clarifying_question":"","reason":"用户切换到新的股票微软"}\n'
+        '{"intent":"concept_explain","relation_to_last_trade":"none","target_ticker":"","target_name":"","requested_field":null,"confidence":0.95,"clarifying_question":"","reason":"用户询问技术指标概念"}\n'
+        '{"intent":"clarify","relation_to_last_trade":"ambiguous","target_ticker":"","target_name":"","requested_field":null,"confidence":0.9,"clarifying_question":"请补充股票名称或代码，例如：微软现在买入节点是多少？","reason":"用户没有提供具体股票"}\n'
+        '{"intent":"context_followup","relation_to_last_trade":"followup","target_ticker":"NVDA","target_name":"英伟达","requested_field":"rationale","confidence":0.93,"clarifying_question":"","reason":"用户追问为什么不是现在买"}\n'
+        '{"intent":"context_followup","relation_to_last_trade":"followup","target_ticker":"NVDA","target_name":"英伟达","requested_field":"defense","confidence":0.93,"clarifying_question":"","reason":"用户追问防守位"}'
     )
 
 
@@ -244,8 +238,7 @@ def _coerce_intent(payload: dict[str, Any], *, has_last_trade_context: bool) -> 
     if intent == "trade_plan":
         if not _looks_like_ticker(target_ticker):
             return _clarify(
-                clarifying_question
-                or "当前股票建议项目只支持美股和美股 ETF。请补充明确的美股名称或代码，例如：微软、英伟达、AMZN、TSLA。",
+                clarifying_question or "请补充明确的股票名称或代码，例如：微软、英伟达、AMZN、TSLA。",
                 confidence,
                 reason,
             )
@@ -255,7 +248,7 @@ def _coerce_intent(payload: dict[str, Any], *, has_last_trade_context: bool) -> 
         target_ticker = ""
         target_name = ""
         if intent == "clarify" and not clarifying_question:
-            clarifying_question = "请补充美股名称或代码，或者说明你想了解的概念。当前股票建议项目只支持美股和美股 ETF。"
+            clarifying_question = "请补充股票名称或代码，或者说明你想了解的概念。"
 
     return ConversationIntent(
         intent=intent,  # type: ignore[arg-type]

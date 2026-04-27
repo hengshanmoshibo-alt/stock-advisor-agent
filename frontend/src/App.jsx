@@ -5,28 +5,24 @@ const STARTER_PROMPTS = [
   "微软现在买入节点是多少？",
   "英伟达如果跌下来，第一买点和防守位是多少？",
   "AMD 这个买点历史胜率怎么样？",
-  "怎么看最近美股回调？",
 ];
-
-const PROJECTS = ["交易计划", "历史节点", "市场解释", "文章检索"];
 
 const MODE_LABELS = {
   mock: "Mock 演示",
   fallback: "本地模板",
-  "openai-compatible": "OpenAI 兼容模型",
+  "openai-compatible": "外部模型",
   ollama: "Ollama",
   "ollama:trade_plan": "Ollama 交易计划",
   "openai-compatible:trade_plan": "外部模型交易计划",
   failover: "本地优先，外部兜底",
   trade_plan_agent: "规则交易计划",
   "trade_plan_agent:cached": "规则交易计划缓存",
+  trade_plan_agent_ai: "AI 润色交易计划",
   trade_plan_context: "连续追问",
   stock_advisor_explainer: "概念解释",
   stock_advisor_clarify: "需要补充信息",
   stock_advisor_llm_router: "Agent 路由",
   trade_plan_insufficient: "数据不足",
-  stock_nodes: "历史节点",
-  generic_rag: "文章 RAG",
   connecting: "连接中",
   offline: "后端未连接",
 };
@@ -46,7 +42,7 @@ const PLAN_LEVEL_LABELS = {
 
 const PLAN_LEVEL_DESCRIPTIONS = {
   low: "当前条件不足，只适合观察，不适合执行买入。",
-  medium: "条件部分满足，可以按计划小仓位观察，但需要确认信号。",
+  medium: "条件部分满足，可以按计划小仓位观察，但仍需要确认信号。",
   high: "条件相对充分，可以按计划执行，但仍要遵守失效条件。",
 };
 
@@ -64,14 +60,6 @@ const PARAMETER_SOURCE_LABELS = {
   default_formula: "默认公式",
 };
 
-const STREAMING_PROGRESS_STAGES = [
-  { delay: 0, text: "正在识别问题和股票..." },
-  { delay: 1500, text: "正在获取行情、K线和市场数据..." },
-  { delay: 4500, text: "正在计算观察区、买入区和失效条件..." },
-  { delay: 9000, text: "正在整理回答，本地模型较慢时会多等一会..." },
-  { delay: 16000, text: "仍在等待数据或本地模型返回，不是页面卡死..." },
-];
-
 export default function App() {
   const [sessionId, setSessionId] = useState("");
   const [messages, setMessages] = useState([]);
@@ -80,23 +68,19 @@ export default function App() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [modelMode, setModelMode] = useState("connecting");
   const [recentConversations, setRecentConversations] = useState([]);
-  const progressTimersRef = useRef([]);
+  const activeAssistantRef = useRef("");
 
   useEffect(() => {
     let active = true;
     createSession()
       .then((payload) => {
-        if (!active) {
-          return;
-        }
+        if (!active) return;
         setSessionId(payload.session_id);
         setStatusText("会话已就绪，可以输入股票或市场问题。");
         refreshSessions(payload.session_id);
       })
       .catch(() => {
-        if (!active) {
-          return;
-        }
+        if (!active) return;
         setSessionId("");
         setModelMode("offline");
         setStatusText("后端不可用。请先启动股票建议后端，再刷新页面。");
@@ -105,8 +89,6 @@ export default function App() {
       active = false;
     };
   }, []);
-
-  useEffect(() => () => clearStreamingProgress(), []);
 
   const conversationItems = useMemo(() => {
     return recentConversations
@@ -122,7 +104,7 @@ export default function App() {
         setSessionId(activeSessionId);
       }
     } catch {
-      // History is non-critical; chat can continue even if this request fails.
+      // 会话列表不是主链路，失败不影响聊天。
     }
   }
 
@@ -162,9 +144,10 @@ export default function App() {
     }
 
     const assistantId = `assistant-${Date.now()}`;
+    activeAssistantRef.current = assistantId;
     setInput("");
     setIsStreaming(true);
-    setStatusText(STREAMING_PROGRESS_STAGES[0].text);
+    setStatusText("正在连接 Agent...");
     setMessages((current) => [
       ...current,
       { id: `user-${Date.now()}`, role: "user", text: trimmed },
@@ -172,7 +155,8 @@ export default function App() {
         id: assistantId,
         role: "assistant",
         text: "",
-        progressText: STREAMING_PROGRESS_STAGES[0].text,
+        progressText: "正在连接 Agent...",
+        progressEvents: [],
         scenarios: [],
         citations: [],
         disclaimer: "",
@@ -180,60 +164,59 @@ export default function App() {
         trade_plan: null,
       },
     ]);
-    startStreamingProgress(assistantId);
 
     try {
       await streamChat({
         sessionId,
         message: trimmed,
         onEvent(type, payload) {
-        if (type === "meta") {
-          setModelMode(payload.model_mode || "connecting");
-          const metaProgress = "已连接后端，正在调用工具和模型...";
-          setStatusText(metaProgress);
-          updateAssistantProgress(assistantId, metaProgress);
-          return;
-        }
-        if (type === "delta") {
-          startTransition(() => {
+          if (type === "meta") {
+            setModelMode(payload.model_mode || "connecting");
+            updateAssistantProgress(assistantId, "已连接后端，正在启动 LangGraph Agent。");
+            return;
+          }
+          if (type === "progress") {
+            const label = payload.label || "正在处理";
+            setStatusText(label);
+            appendAssistantProgress(assistantId, payload);
+            return;
+          }
+          if (type === "delta") {
+            startTransition(() => {
+              setMessages((current) =>
+                current.map((message) =>
+                  message.id === assistantId
+                    ? { ...message, text: `${message.text}${payload.text}`, progressText: "" }
+                    : message,
+                ),
+              );
+            });
+            return;
+          }
+          if (type === "structured") {
             setMessages((current) =>
               current.map((message) =>
-                message.id === assistantId
-                  ? { ...message, text: `${message.text}${payload.text}`, progressText: "" }
-                  : message,
+                message.id === assistantId ? { ...message, ...payload, progressText: "" } : message,
               ),
             );
-          });
-          return;
-        }
-        if (type === "structured") {
-          clearStreamingProgress();
-          setMessages((current) =>
-            current.map((message) =>
-              message.id === assistantId ? { ...message, ...payload, progressText: "" } : message,
-            ),
-          );
-          setStatusText("回答完成。");
-          return;
-        }
-        if (type === "error") {
-          clearStreamingProgress();
-          setStatusText(payload.message || "请求失败，请稍后重试。");
-          updateAssistantProgress(assistantId, "");
-          setIsStreaming(false);
-          return;
-        }
-        if (type === "done") {
-          clearStreamingProgress();
-          setStatusText("就绪。");
-          updateAssistantProgress(assistantId, "");
-          setIsStreaming(false);
-          refreshSessions(sessionId);
-        }
+            setStatusText("回答完成。");
+            return;
+          }
+          if (type === "error") {
+            setStatusText(payload.message || "请求失败，请稍后重试。");
+            updateAssistantProgress(assistantId, "");
+            setIsStreaming(false);
+            return;
+          }
+          if (type === "done") {
+            setStatusText("就绪。");
+            updateAssistantProgress(assistantId, "");
+            setIsStreaming(false);
+            refreshSessions(sessionId);
+          }
         },
       });
     } catch (error) {
-      clearStreamingProgress();
       const message = error instanceof Error ? error.message : "请求失败，请稍后重试。";
       setStatusText(message);
       setMessages((current) =>
@@ -247,21 +230,6 @@ export default function App() {
     }
   }
 
-  function startStreamingProgress(assistantId) {
-    clearStreamingProgress();
-    progressTimersRef.current = STREAMING_PROGRESS_STAGES.map((stage) =>
-      window.setTimeout(() => {
-        setStatusText(stage.text);
-        updateAssistantProgress(assistantId, stage.text);
-      }, stage.delay),
-    );
-  }
-
-  function clearStreamingProgress() {
-    progressTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
-    progressTimersRef.current = [];
-  }
-
   function updateAssistantProgress(assistantId, progressText) {
     setMessages((current) =>
       current.map((message) =>
@@ -270,22 +238,28 @@ export default function App() {
     );
   }
 
+  function appendAssistantProgress(assistantId, progress) {
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === assistantId
+          ? {
+              ...message,
+              progressText: progress.label,
+              progressEvents: [...(message.progressEvents || []), progress],
+            }
+          : message,
+      ),
+    );
+  }
+
   return (
     <div className="page">
       <aside className="sidebar">
         <div className="sidebar-top">
-          <div className="logo-row">
-            <div className="logo-mark">AI</div>
-            <button type="button" className="sidebar-icon" aria-label="折叠菜单">
-              ≡
-            </button>
-          </div>
-
           <button type="button" className="new-chat-button" onClick={handleNewChat}>
-            <span>＋</span>
+            <span>+</span>
             <span>新建对话</span>
           </button>
-
         </div>
 
         <div className="sidebar-section recent">
@@ -302,21 +276,20 @@ export default function App() {
             ))}
           </div>
         </div>
-
       </aside>
 
       <main className="main">
         <header className="topbar">
           <div className="topbar-left">
             <strong>智能投顾助手</strong>
-            <span>{sessionId ? `会话 ${sessionId.slice(0, 8)}` : "正在连接"}</span>
+            <span>{MODE_LABELS[modelMode] || modelMode}</span>
           </div>
         </header>
 
         <section className={`conversation ${messages.length ? "thread-mode" : "home-mode"}`}>
           {messages.length === 0 ? (
             <div className="hero">
-              <p className="eyebrow">Trade Plan Agent</p>
+              <p className="eyebrow">LangGraph Trade Plan Agent</p>
               <h1>把买入节点变成可验证的交易计划</h1>
               <p>{statusText}</p>
             </div>
@@ -333,7 +306,7 @@ export default function App() {
           <div className="composer">
             {!messages.length ? (
               <div className="starter-row">
-                {STARTER_PROMPTS.slice(0, 3).map((prompt) => (
+                {STARTER_PROMPTS.map((prompt) => (
                   <button
                     key={prompt}
                     type="button"
@@ -357,16 +330,13 @@ export default function App() {
                 placeholder="输入你想分析的股票，例如：MSFT、NVDA、AMD..."
               />
               <div className="composer-actions">
-                <button type="button" className="ghost-icon" aria-label="附件">
-                  ⌁
-                </button>
                 <button
                   type="submit"
                   className="submit-button"
                   disabled={!sessionId || isStreaming || !input.trim()}
                   aria-label="发送"
                 >
-                  {isStreaming ? "…" : "↑"}
+                  {isStreaming ? "…" : "→"}
                 </button>
               </div>
             </form>
@@ -381,15 +351,6 @@ export default function App() {
   );
 }
 
-function NavItem({ label, active = false }) {
-  return (
-    <button type="button" className={`nav-item ${active ? "active" : ""}`}>
-      <span className="nav-dot">•</span>
-      <span>{label}</span>
-    </button>
-  );
-}
-
 function SidebarRow({ label, muted = false, active = false, onClick }) {
   return (
     <button
@@ -397,7 +358,6 @@ function SidebarRow({ label, muted = false, active = false, onClick }) {
       className={`sidebar-row ${muted ? "muted" : ""} ${active ? "active" : ""}`}
       onClick={onClick}
     >
-      <span className="row-icon">↳</span>
       <span>{label}</span>
     </button>
   );
@@ -405,7 +365,6 @@ function SidebarRow({ label, muted = false, active = false, onClick }) {
 
 function MessageBlock({ message }) {
   const isAssistant = message.role === "assistant";
-
   return (
     <article className={`message-block ${message.role}`}>
       <div className="message-avatar">{isAssistant ? "AI" : "你"}</div>
@@ -418,6 +377,10 @@ function MessageBlock({ message }) {
             </span>
           ) : null}
         </div>
+
+        {isAssistant && message.progressEvents?.length && !message.text ? (
+          <AgentProgress events={message.progressEvents} />
+        ) : null}
 
         <div className={`message-text ${isAssistant && !message.text ? "pending-text" : ""}`}>
           {message.text || message.progressText || "正在生成回答..."}
@@ -469,6 +432,16 @@ function MessageBlock({ message }) {
   );
 }
 
+function AgentProgress({ events }) {
+  return (
+    <div className="agent-progress">
+      {events.map((event, index) => (
+        <span key={`${event.step}-${index}`}>{event.label}</span>
+      ))}
+    </div>
+  );
+}
+
 function TradePlanCard({ tradePlan }) {
   const firstBuyStats = tradePlan.backtest_summary?.node_stats?.first_buy;
   const score = tradePlan.score_breakdown;
@@ -479,8 +452,7 @@ function TradePlanCard({ tradePlan }) {
         <div>
           <span className="card-kicker">结构化交易计划</span>
           <h3>
-            {tradePlan.display_stock || tradePlan.ticker}{" "}
-            <span>{tradePlan.ticker}</span>
+            {tradePlan.display_stock || tradePlan.ticker} <span>{tradePlan.ticker}</span>
           </h3>
         </div>
         <div className={`action-pill ${tradePlan.action_state || "wait"}`}>
@@ -543,15 +515,9 @@ function TradePlanCard({ tradePlan }) {
 }
 
 function plainActionTitle(actionState) {
-  if (actionState === "starter_allowed") {
-    return "结论：可以小仓试探";
-  }
-  if (actionState === "add_allowed") {
-    return "结论：可以按计划加仓";
-  }
-  if (actionState === "risk_reduce") {
-    return "结论：先控制风险";
-  }
+  if (actionState === "starter_allowed") return "结论：可以小仓试探";
+  if (actionState === "add_allowed") return "结论：可以按计划加仓";
+  if (actionState === "risk_reduce") return "结论：先控制风险";
   return "结论：现在先等";
 }
 
@@ -630,12 +596,8 @@ function nodeActionText(node, currentPrice) {
 }
 
 function nodeRoleLabel(node) {
-  if (node.role_label) {
-    return node.role_label;
-  }
-  if (!node.active) {
-    return "暂不参考";
-  }
+  if (node.role_label) return node.role_label;
+  if (!node.active) return "暂不参考";
   return {
     observation: "观察参考",
     first_buy: "分批候选",
@@ -701,32 +663,22 @@ function Metric({ label, value, tone = "neutral" }) {
 }
 
 function formatRange(lower, upper) {
-  if (lower == null && upper == null) {
-    return "暂无";
-  }
-  if (lower === upper || upper == null) {
-    return formatPrice(lower);
-  }
+  if (lower == null && upper == null) return "暂无";
+  if (lower === upper || upper == null) return formatPrice(lower);
   return `${formatPrice(lower)} - ${formatPrice(upper)}`;
 }
 
 function formatPrice(value) {
-  if (value == null || Number.isNaN(Number(value))) {
-    return "暂无";
-  }
+  if (value == null || Number.isNaN(Number(value))) return "暂无";
   return Number(value).toFixed(2);
 }
 
 function formatPercent(value) {
-  if (value == null || Number.isNaN(Number(value))) {
-    return "暂无";
-  }
+  if (value == null || Number.isNaN(Number(value))) return "暂无";
   return `${(Number(value) * 100).toFixed(1)}%`;
 }
 
 function formatNumber(value) {
-  if (value == null || Number.isNaN(Number(value))) {
-    return "0.00";
-  }
+  if (value == null || Number.isNaN(Number(value))) return "0.00";
   return Number(value).toFixed(2);
 }

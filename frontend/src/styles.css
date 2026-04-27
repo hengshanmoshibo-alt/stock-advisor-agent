@@ -307,6 +307,21 @@ button {
   font-size: 1rem;
 }
 
+.agent-progress {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 10px;
+}
+
+.agent-progress span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 5px 9px;
+}
+
 .pending-text {
   display: inline-flex;
   align-items: center;

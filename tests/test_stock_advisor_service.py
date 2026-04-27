@@ -330,6 +330,37 @@ class StockAdvisorServiceTest(unittest.TestCase):
         self.assertIsNone(payload.trade_plan)
         self.assertIn("数据不足", payload.answer)
 
+    def test_stream_chat_emits_langgraph_progress_events(self) -> None:
+        service = StockAdvisorService()
+        service.intent_resolver = FakeIntentResolver(
+            [
+                ConversationIntent(
+                    intent="trade_plan",
+                    relation_to_last_trade="none",
+                    target_ticker="NVDA",
+                    target_name="英伟达",
+                    confidence=0.95,
+                )
+            ]
+        )
+        service.quote_lookup = fake_quote
+        service.market_data = FakeMarketData()
+        service.fundamentals = FakeFundamentals()
+        session = service.sessions.create()
+
+        async def collect_events() -> list[str]:
+            return [event async for event in service.stream_chat(session.session_id, "英伟达现在能不能买？")]
+
+        events = asyncio.run(collect_events())
+        joined = "".join(events)
+
+        self.assertIn("event: meta", joined)
+        self.assertIn("event: progress", joined)
+        self.assertIn("resolve_intent", joined)
+        self.assertIn("run_trade_tools", joined)
+        self.assertIn("event: structured", joined)
+        self.assertIn("event: done", joined)
+
 
 class ConversationIntentResolverTest(unittest.TestCase):
     def test_context_followup_requires_previous_trade_context(self) -> None:
