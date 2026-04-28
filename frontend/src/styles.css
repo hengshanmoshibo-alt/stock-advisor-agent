@@ -322,6 +322,12 @@ button {
   padding: 5px 9px;
 }
 
+.agent-progress strong {
+  color: var(--text);
+  font-weight: 700;
+  margin-right: 6px;
+}
+
 .pending-text {
   display: inline-flex;
   align-items: center;

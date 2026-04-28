@@ -23,17 +23,52 @@ from .trade_plan_agent import TradePlanResult, build_trade_plan
 
 ARTICLE_ONLY_DISCLAIMER = "以上内容仅用于功能路由提示，不构成投资建议。"
 
-PROGRESS_LABELS = {
-    "resolve_intent": "正在识别问题和上下文",
-    "answer_context_followup": "正在读取上一轮交易计划",
-    "answer_concept": "正在整理概念解释",
-    "answer_article_history": "正在判断历史文章请求",
-    "answer_clarify": "正在生成澄清问题",
-    "run_trade_tools": "正在获取行情、K线和市场数据",
-    "build_trade_plan": "正在计算交易计划",
-    "generate_answer": "正在组织回答",
-    "validate_answer": "正在校验价格和节点一致性",
-    "save_context": "正在保存本轮交易上下文",
+PROGRESS_EVENTS = {
+    "router_agent": {
+        "agent": "RouterAgent",
+        "step": "route",
+        "label": "Router Agent 正在理解问题",
+    },
+    "context_agent": {
+        "agent": "RouterAgent",
+        "step": "context_followup",
+        "label": "Router Agent 正在读取上一轮交易计划",
+    },
+    "concept_agent": {
+        "agent": "RouterAgent",
+        "step": "concept_explain",
+        "label": "Router Agent 正在整理概念解释",
+    },
+    "article_history_agent": {
+        "agent": "RouterAgent",
+        "step": "article_history",
+        "label": "Router Agent 正在处理历史文章请求",
+    },
+    "clarify_agent": {
+        "agent": "RouterAgent",
+        "step": "clarify",
+        "label": "Router Agent 正在生成澄清问题",
+    },
+    "data_agent": {
+        "agent": "DataAgent",
+        "step": "run_tools",
+        "label": "Data Agent 正在获取行情和K线",
+    },
+    "analysis_agent": {
+        "agent": "AnalysisAgent",
+        "step": "build_plan",
+        "label": "Analysis Agent 正在计算交易计划",
+    },
+    "writer_critic_agent": {
+        "agent": "WriterCriticAgent",
+        "step": "write_and_check",
+        "label": "Writer/Critic Agent 正在生成并校验回答",
+    },
+    "payload_agent": {
+        "agent": "WriterCriticAgent",
+        "step": "build_payload",
+        "label": "Writer/Critic Agent 正在整理最终结果",
+    },
 }
 
 
@@ -50,7 +85,6 @@ class AgentState(TypedDict, total=False):
     message: str
     last_trade_context: LastTradeContext | None
     intent: ConversationIntent
-    route: str
     agent_plan: AgentPlan
     tools: TradePlanToolBundle
     trade_result: TradePlanResult
@@ -60,11 +94,16 @@ class AgentState(TypedDict, total=False):
     model_mode: str
     answer_mode: str
     payload: ChatPayload
+    agent_trace: list[dict[str, object]]
     error: str
 
 
 class StockAdvisorGraph:
-    """LangGraph orchestration for the controlled stock advisor Agent."""
+    """Controlled multi-agent stock advisor graph.
+
+    LLM calls are limited to RouterAgent and WriterCriticAgent. Data retrieval,
+    price nodes, scoring, and structured trade plans remain deterministic.
+    """
 
     def __init__(
         self,
@@ -89,15 +128,14 @@ class StockAdvisorGraph:
             "session": session,
             "message": message,
             "last_trade_context": last_trade_context,
+            "agent_trace": [],
         }
         final_payload: ChatPayload | None = None
         async for update in self.graph.astream(state, stream_mode="updates"):
             for node_name, node_update in update.items():
-                if node_name in PROGRESS_LABELS:
-                    yield (
-                        "progress",
-                        {"step": node_name, "label": PROGRESS_LABELS[node_name]},
-                    )
+                progress = PROGRESS_EVENTS.get(node_name)
+                if progress is not None:
+                    yield ("progress", dict(progress))
                 if isinstance(node_update, dict) and isinstance(node_update.get("payload"), ChatPayload):
                     final_payload = node_update["payload"]
         if final_payload is None:
@@ -115,6 +153,7 @@ class StockAdvisorGraph:
             "session": session,
             "message": message,
             "last_trade_context": last_trade_context,
+            "agent_trace": [],
         }
         result = await self.graph.ainvoke(state)
         payload = result.get("payload")
@@ -124,53 +163,59 @@ class StockAdvisorGraph:
 
     def _compile_graph(self) -> CompiledStateGraph:
         graph: StateGraph = StateGraph(AgentState)
-        graph.add_node("resolve_intent", self._resolve_intent)
-        graph.add_node("answer_context_followup", self._answer_context_followup)
-        graph.add_node("answer_concept", self._answer_concept)
-        graph.add_node("answer_article_history", self._answer_article_history)
-        graph.add_node("answer_clarify", self._answer_clarify)
-        graph.add_node("run_trade_tools", self._run_trade_tools)
-        graph.add_node("build_trade_plan", self._build_trade_plan)
-        graph.add_node("generate_answer", self._generate_answer)
-        graph.add_node("validate_answer", self._validate_answer)
-        graph.add_node("save_context", self._save_context)
+        graph.add_node("router_agent", self._router_agent)
+        graph.add_node("context_agent", self._context_agent)
+        graph.add_node("concept_agent", self._concept_agent)
+        graph.add_node("article_history_agent", self._article_history_agent)
+        graph.add_node("clarify_agent", self._clarify_agent)
+        graph.add_node("data_agent", self._data_agent)
+        graph.add_node("analysis_agent", self._analysis_agent)
+        graph.add_node("writer_critic_agent", self._writer_critic_agent)
+        graph.add_node("payload_agent", self._payload_agent)
 
-        graph.set_entry_point("resolve_intent")
+        graph.set_entry_point("router_agent")
         graph.add_conditional_edges(
-            "resolve_intent",
+            "router_agent",
             self._route_from_intent,
             {
-                "context_followup": "answer_context_followup",
-                "concept_explain": "answer_concept",
-                "article_history": "answer_article_history",
-                "clarify": "answer_clarify",
-                "trade_plan": "run_trade_tools",
+                "context_followup": "context_agent",
+                "concept_explain": "concept_agent",
+                "article_history": "article_history_agent",
+                "clarify": "clarify_agent",
+                "trade_plan": "data_agent",
             },
         )
-        graph.add_edge("run_trade_tools", "build_trade_plan")
         graph.add_conditional_edges(
-            "build_trade_plan",
-            self._route_after_trade_plan,
+            "data_agent",
+            self._route_after_data,
+            {
+                "cached": END,
+                "analysis": "analysis_agent",
+            },
+        )
+        graph.add_conditional_edges(
+            "analysis_agent",
+            self._route_after_analysis,
             {
                 "insufficient": END,
-                "generate": "generate_answer",
+                "write": "writer_critic_agent",
             },
         )
-        graph.add_edge("generate_answer", "validate_answer")
-        graph.add_edge("validate_answer", "save_context")
-        graph.add_edge("save_context", END)
-        graph.add_edge("answer_context_followup", END)
-        graph.add_edge("answer_concept", END)
-        graph.add_edge("answer_article_history", END)
-        graph.add_edge("answer_clarify", END)
+        graph.add_edge("writer_critic_agent", "payload_agent")
+        graph.add_edge("payload_agent", END)
+        graph.add_edge("context_agent", END)
+        graph.add_edge("concept_agent", END)
+        graph.add_edge("article_history_agent", END)
+        graph.add_edge("clarify_agent", END)
         return graph.compile()
 
-    async def _resolve_intent(self, state: AgentState) -> dict[str, object]:
+    async def _router_agent(self, state: AgentState) -> dict[str, object]:
         try:
             intent = await self.intent_resolver.resolve(
                 state["message"],
                 last_trade_context=_to_intent_context(state.get("last_trade_context")),
             )
+            summary = f"intent={intent.intent}, ticker={intent.target_ticker or '-'}"
         except Exception:
             intent = ConversationIntent(
                 intent="clarify",
@@ -179,70 +224,81 @@ class StockAdvisorGraph:
                 clarifying_question="我暂时无法稳定识别你的问题，请补充股票名称或具体想问的内容。",
                 reason="intent resolver failed",
             )
-        return {"intent": intent}
+            summary = "intent resolver failed; routed to clarify"
+        return {
+            "intent": intent,
+            "agent_trace": _append_trace(state, "RouterAgent", "ok", summary),
+        }
 
     def _route_from_intent(self, state: AgentState) -> str:
-        intent = state["intent"]
-        if intent.intent == "trade_plan":
-            return "trade_plan"
-        return intent.intent
+        return state["intent"].intent
 
-    def _route_after_trade_plan(self, state: AgentState) -> str:
+    def _route_after_data(self, state: AgentState) -> str:
+        return "cached" if isinstance(state.get("payload"), ChatPayload) else "analysis"
+
+    def _route_after_analysis(self, state: AgentState) -> str:
         result = state.get("trade_result")
         if result is None or result.trade_plan is None:
             return "insufficient"
-        return "generate"
+        return "write"
 
-    def _answer_context_followup(self, state: AgentState) -> dict[str, object]:
+    def _context_agent(self, state: AgentState) -> dict[str, object]:
         session = state["session"]
         message = state["message"]
         context = state.get("last_trade_context")
         intent = state["intent"]
         if context is None or context.payload.trade_plan is None:
+            answer = "我还没有上一只股票的交易计划，请先告诉我要分析哪只股票。"
             payload = _simple_payload(
                 service=self.service,
                 session=session,
                 message=message,
-                answer="我还没有上一只股票的交易计划，请先告诉我要分析哪只股票。",
+                answer=answer,
                 mode="stock_advisor_clarify",
                 disclaimer=CONCEPT_DISCLAIMER,
             )
-            return {"payload": payload}
-        answer = render_context_followup_answer(
-            requested_field=intent.requested_field or "full_plan",
-            trade_plan=context.payload.trade_plan,
-        )
-        payload = _simple_payload(
-            service=self.service,
-            session=session,
-            message=message,
-            answer=answer,
-            mode="stock_advisor_context",
-            disclaimer=TRADE_PLAN_DISCLAIMER,
-            answer_mode="trade_plan_context",
-        )
-        return {"payload": payload}
+        else:
+            answer = render_context_followup_answer(
+                requested_field=intent.requested_field or "full_plan",
+                trade_plan=context.payload.trade_plan,
+            )
+            payload = _simple_payload(
+                service=self.service,
+                session=session,
+                message=message,
+                answer=answer,
+                mode="stock_advisor_context",
+                disclaimer=TRADE_PLAN_DISCLAIMER,
+                answer_mode="trade_plan_context",
+            )
+        return {
+            "payload": payload,
+            "agent_trace": _append_trace(state, "RouterAgent", "ok", "answered context follow-up"),
+        }
 
-    async def _answer_concept(self, state: AgentState) -> dict[str, object]:
-        session = state["session"]
-        message = state["message"]
+    async def _concept_agent(self, state: AgentState) -> dict[str, object]:
         try:
-            answer = await self.explainer.explain(message)
+            answer = await self.explainer.explain(state["message"])
             mode = "stock_advisor_explainer"
+            summary = "concept explained by LLM"
         except Exception:
             answer = "我暂时不能调用解释模型。如果你想计算某只股票的买入节点，请直接输入股票名称或代码。"
             mode = "stock_advisor_llm_router"
+            summary = "concept explainer failed; used fallback"
         payload = _simple_payload(
             service=self.service,
-            session=session,
-            message=message,
+            session=state["session"],
+            message=state["message"],
             answer=answer,
             mode=mode,
             disclaimer=CONCEPT_DISCLAIMER,
         )
-        return {"payload": payload}
+        return {
+            "payload": payload,
+            "agent_trace": _append_trace(state, "RouterAgent", "ok", summary),
+        }
 
-    def _answer_article_history(self, state: AgentState) -> dict[str, object]:
+    def _article_history_agent(self, state: AgentState) -> dict[str, object]:
         payload = _simple_payload(
             service=self.service,
             session=state["session"],
@@ -251,9 +307,12 @@ class StockAdvisorGraph:
             mode="stock_advisor_llm_router",
             disclaimer=ARTICLE_ONLY_DISCLAIMER,
         )
-        return {"payload": payload}
+        return {
+            "payload": payload,
+            "agent_trace": _append_trace(state, "RouterAgent", "ok", "article history request isolated"),
+        }
 
-    def _answer_clarify(self, state: AgentState) -> dict[str, object]:
+    def _clarify_agent(self, state: AgentState) -> dict[str, object]:
         intent = state["intent"]
         payload = _simple_payload(
             service=self.service,
@@ -263,9 +322,12 @@ class StockAdvisorGraph:
             mode="stock_advisor_clarify",
             disclaimer=CONCEPT_DISCLAIMER,
         )
-        return {"payload": payload}
+        return {
+            "payload": payload,
+            "agent_trace": _append_trace(state, "RouterAgent", "ok", "asked for clarification"),
+        }
 
-    async def _run_trade_tools(self, state: AgentState) -> dict[str, object]:
+    async def _data_agent(self, state: AgentState) -> dict[str, object]:
         intent = state["intent"]
         source_key = intent.target_ticker.lower()
         agent_plan = AgentPlan(
@@ -283,7 +345,11 @@ class StockAdvisorGraph:
                 query=state["message"],
                 payload=cached,
             )
-            return {"agent_plan": agent_plan, "payload": payload}
+            return {
+                "agent_plan": agent_plan,
+                "payload": payload,
+                "agent_trace": _append_trace(state, "DataAgent", "cached", f"{source_key} cache hit"),
+            }
         tools = await TradePlanToolRunner(
             market_data=self.service.market_data,
             fundamentals=self.service.fundamentals,
@@ -291,11 +357,20 @@ class StockAdvisorGraph:
             finnhub_api_key=self.service.settings.finnhub_api_key,
             quote_lookup_fn=self.service.quote_lookup,
         ).run(source_key)
-        return {"agent_plan": agent_plan, "tools": tools}
+        tool_status = tools.as_log_facts()
+        return {
+            "agent_plan": agent_plan,
+            "tools": tools,
+            "agent_trace": _append_trace(
+                state,
+                "DataAgent",
+                "ok",
+                f"quote={tools.quote.ok}, candles={tools.candles.ok}, fundamentals={tools.fundamentals.ok}",
+                tool_status=tool_status,
+            ),
+        }
 
-    def _build_trade_plan(self, state: AgentState) -> dict[str, object]:
-        if isinstance(state.get("payload"), ChatPayload):
-            return {}
+    def _analysis_agent(self, state: AgentState) -> dict[str, object]:
         session = state["session"]
         agent_plan = state["agent_plan"]
         tools = state["tools"]
@@ -325,7 +400,12 @@ class StockAdvisorGraph:
                 answer_mode="trade_plan_insufficient",
                 trade_plan=None,
             )
-            return {"trade_result": result, "payload": payload}
+            return {
+                "trade_result": result,
+                "payload": payload,
+                "agent_trace": _append_trace(state, "AnalysisAgent", "insufficient", "trade plan data insufficient"),
+            }
+        summary = f"action={result.action_state}, confidence={result.confidence}"
         return {
             "trade_result": result,
             "answer": result.answer,
@@ -333,52 +413,51 @@ class StockAdvisorGraph:
             "disclaimer": TRADE_PLAN_DISCLAIMER,
             "model_mode": "trade_plan_agent",
             "answer_mode": "trade_plan_agent",
+            "agent_trace": _append_trace(state, "AnalysisAgent", "ok", summary),
         }
 
-    async def _generate_answer(self, state: AgentState) -> dict[str, object]:
+    async def _writer_critic_agent(self, state: AgentState) -> dict[str, object]:
         result = state["trade_result"]
+        update: dict[str, object] = {
+            "answer": result.answer,
+            "scenarios": result.scenarios,
+            "disclaimer": TRADE_PLAN_DISCLAIMER,
+            "model_mode": "trade_plan_agent",
+            "answer_mode": "trade_plan_agent",
+        }
+        summary = "used deterministic answer"
         if (
-            not self.service.settings.enable_trade_plan_llm
-            or self.service.llm_client.mode == "fallback"
-            or result.trade_plan is None
+            self.service.settings.enable_trade_plan_llm
+            and self.service.llm_client.mode != "fallback"
+            and result.trade_plan is not None
         ):
-            return {}
-        try:
-            generation = await self.service.llm_client.generate_trade_plan_answer(
-                query=state["agent_plan"].raw_query,
-                deterministic_answer=result.answer,
-                trade_facts=result.facts,
-                scenarios=result.scenarios,
-                session_context=self.service._render_context(state["session"]),
-            )
-            return {
-                "answer": generation.answer,
-                "scenarios": generation.scenarios,
-                "disclaimer": generation.disclaimer,
-                "model_mode": generation.mode,
-                "answer_mode": "trade_plan_agent_ai",
-            }
-        except Exception:
-            return {
-                "answer": result.answer,
-                "scenarios": result.scenarios,
-                "disclaimer": TRADE_PLAN_DISCLAIMER,
-                "model_mode": "trade_plan_agent",
-                "answer_mode": "trade_plan_agent",
-            }
+            try:
+                generation = await self.service.llm_client.generate_trade_plan_answer(
+                    query=state["agent_plan"].raw_query,
+                    deterministic_answer=result.answer,
+                    trade_facts=result.facts,
+                    scenarios=result.scenarios,
+                    session_context=self.service._render_context(state["session"]),
+                )
+                answer = generation.answer
+                if not self.service._trade_plan_answer_is_consistent(answer, result.trade_plan):
+                    raise ValueError("LLM trade plan answer failed deterministic validation")
+                if not _has_minimum_trade_plan_content(answer, result.trade_plan):
+                    raise ValueError("LLM trade plan answer is too thin")
+                update = {
+                    "answer": self.service._ensure_trade_plan_sections(answer, result.trade_plan),
+                    "scenarios": generation.scenarios,
+                    "disclaimer": generation.disclaimer,
+                    "model_mode": generation.mode,
+                    "answer_mode": "trade_plan_agent_ai",
+                }
+                summary = "LLM answer accepted by critic"
+            except Exception:
+                summary = "LLM answer rejected; used deterministic answer"
+        update["agent_trace"] = _append_trace(state, "WriterCriticAgent", "ok", summary)
+        return update
 
-    def _validate_answer(self, state: AgentState) -> dict[str, object]:
-        result = state["trade_result"]
-        answer = str(state.get("answer") or result.answer)
-        if result.trade_plan is None:
-            return {}
-        if not self.service._trade_plan_answer_is_consistent(answer, result.trade_plan):
-            return _fallback_answer_update(result)
-        if not _has_minimum_trade_plan_content(answer, result.trade_plan):
-            return _fallback_answer_update(result)
-        return {"answer": self.service._ensure_trade_plan_sections(answer, result.trade_plan)}
-
-    def _save_context(self, state: AgentState) -> dict[str, object]:
+    def _payload_agent(self, state: AgentState) -> dict[str, object]:
         session = state["session"]
         result = state["trade_result"]
         answer = str(state.get("answer") or result.answer)
@@ -400,17 +479,29 @@ class StockAdvisorGraph:
             trade_plan=result.trade_plan,
         )
         self.service._set_cached_trade_plan(state["agent_plan"].source_key or "", payload)
-        return {"payload": payload}
+        return {
+            "payload": payload,
+            "agent_trace": _append_trace(state, "WriterCriticAgent", "ok", "final payload built"),
+        }
 
 
-def _fallback_answer_update(result: TradePlanResult) -> dict[str, object]:
-    return {
-        "answer": result.answer,
-        "scenarios": result.scenarios,
-        "disclaimer": TRADE_PLAN_DISCLAIMER,
-        "model_mode": "trade_plan_agent",
-        "answer_mode": "trade_plan_agent",
+def _append_trace(
+    state: AgentState,
+    name: str,
+    status: str,
+    summary: str,
+    *,
+    tool_status: dict[str, object] | None = None,
+) -> list[dict[str, object]]:
+    item: dict[str, object] = {
+        "name": name,
+        "status": status,
+        "summary": summary,
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    if tool_status is not None:
+        item["tool_status"] = tool_status
+    return [*(state.get("agent_trace") or []), item]
 
 
 def _simple_payload(

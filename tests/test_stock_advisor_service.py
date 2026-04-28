@@ -356,8 +356,12 @@ class StockAdvisorServiceTest(unittest.TestCase):
 
         self.assertIn("event: meta", joined)
         self.assertIn("event: progress", joined)
-        self.assertIn("resolve_intent", joined)
-        self.assertIn("run_trade_tools", joined)
+        self.assertIn("RouterAgent", joined)
+        self.assertIn("DataAgent", joined)
+        self.assertIn("AnalysisAgent", joined)
+        self.assertIn("WriterCriticAgent", joined)
+        self.assertIn("run_tools", joined)
+        self.assertIn("write_and_check", joined)
         self.assertIn("event: structured", joined)
         self.assertIn("event: done", joined)
 

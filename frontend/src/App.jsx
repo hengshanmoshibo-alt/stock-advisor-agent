@@ -1,4 +1,4 @@
-import { startTransition, useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useEffect, useMemo, useState } from "react";
 import { createSession, getSession, listSessions, streamChat } from "./api.js";
 
 const STARTER_PROMPTS = [
@@ -68,7 +68,6 @@ export default function App() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [modelMode, setModelMode] = useState("connecting");
   const [recentConversations, setRecentConversations] = useState([]);
-  const activeAssistantRef = useRef("");
 
   useEffect(() => {
     let active = true;
@@ -100,9 +99,7 @@ export default function App() {
     try {
       const sessions = await listSessions();
       setRecentConversations(sessions);
-      if (activeSessionId) {
-        setSessionId(activeSessionId);
-      }
+      if (activeSessionId) setSessionId(activeSessionId);
     } catch {
       // 会话列表不是主链路，失败不影响聊天。
     }
@@ -121,9 +118,7 @@ export default function App() {
   }
 
   async function handleSelectConversation(selectedSessionId) {
-    if (!selectedSessionId || selectedSessionId === sessionId || isStreaming) {
-      return;
-    }
+    if (!selectedSessionId || selectedSessionId === sessionId || isStreaming) return;
     try {
       const payload = await getSession(selectedSessionId);
       setSessionId(payload.session_id);
@@ -139,12 +134,9 @@ export default function App() {
   async function handleSubmit(event) {
     event.preventDefault();
     const trimmed = input.trim();
-    if (!trimmed || !sessionId || isStreaming) {
-      return;
-    }
+    if (!trimmed || !sessionId || isStreaming) return;
 
     const assistantId = `assistant-${Date.now()}`;
-    activeAssistantRef.current = assistantId;
     setInput("");
     setIsStreaming(true);
     setStatusText("正在连接 Agent...");
@@ -172,7 +164,7 @@ export default function App() {
         onEvent(type, payload) {
           if (type === "meta") {
             setModelMode(payload.model_mode || "connecting");
-            updateAssistantProgress(assistantId, "已连接后端，正在启动 LangGraph Agent。");
+            updateAssistantProgress(assistantId, "已连接后端，正在启动 Multi-Agent。");
             return;
           }
           if (type === "progress") {
@@ -289,7 +281,7 @@ export default function App() {
         <section className={`conversation ${messages.length ? "thread-mode" : "home-mode"}`}>
           {messages.length === 0 ? (
             <div className="hero">
-              <p className="eyebrow">LangGraph Trade Plan Agent</p>
+              <p className="eyebrow">Multi-Agent Trade Plan</p>
               <h1>把买入节点变成可验证的交易计划</h1>
               <p>{statusText}</p>
             </div>
@@ -436,7 +428,10 @@ function AgentProgress({ events }) {
   return (
     <div className="agent-progress">
       {events.map((event, index) => (
-        <span key={`${event.step}-${index}`}>{event.label}</span>
+        <span key={`${event.agent || event.step}-${index}`}>
+          {event.agent ? <strong>{event.agent}</strong> : null}
+          {event.label}
+        </span>
       ))}
     </div>
   );
@@ -571,15 +566,9 @@ function NodeList({ nodes, currentPrice }) {
 }
 
 function nodeActionText(node, currentPrice) {
-  if (!node?.active) {
-    return node?.plain_explanation || node?.action || "当前条件未满足。";
-  }
-  if (node.plain_explanation) {
-    return node.plain_explanation;
-  }
-  if (node.key !== "observation") {
-    return node.action || "当前条件未满足。";
-  }
+  if (!node?.active) return node?.plain_explanation || node?.action || "当前条件未满足。";
+  if (node.plain_explanation) return node.plain_explanation;
+  if (node.key !== "observation") return node.action || "当前条件未满足。";
   const price = Number(currentPrice);
   const lower = Number(node.lower);
   const upper = Number(node.upper);
@@ -589,9 +578,7 @@ function nodeActionText(node, currentPrice) {
   if (price >= lower && price <= upper) {
     return "已进入观察区；先看能否企稳确认，不是立刻买入信号。";
   }
-  if (price > upper) {
-    return "等待价格回到观察区并企稳；未进入前不追高。";
-  }
+  if (price > upper) return "等待价格回到观察区并企稳；未进入前不追高。";
   return "价格已跌破观察区，先等待重新收回区间。";
 }
 
